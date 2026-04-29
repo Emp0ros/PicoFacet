@@ -1,0 +1,143 @@
+;
+; Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+; These programs implement full-duplex SPI, with a SCK period of 4 clock
+; cycles. A different program is provided for each value of CPHA, and CPOL is
+; achieved using the hardware GPIO inversion available in the IO controls.
+;
+; Transmit-only SPI can go twice as fast -- see the ST7789 example!
+.pio_version 0 // only requires PIO version 0
+
+.program spi_cpha0
+.side_set 1
+
+; Pin assignments:
+; - SCK is side-set pin 0
+; - MOSI is OUT pin 0
+; - MISO is IN pin 0
+;
+; Autopush and autopull must be enabled, and the serial frame size is set by
+; configuring the push/pull threshold. Shift left/right is fine, but you must
+; justify the data yourself. This is done most conveniently for frame sizes of
+; 8 or 16 bits by using the narrow store replication and narrow load byte
+; picking behaviour of RP2040's IO fabric.
+
+; Clock phase = 0: data is captured on the leading edge of each SCK pulse, and
+; transitions on the trailing edge, or some time before the first leading edge.
+
+    out pins, 1 side 0 [1] ; Stall here on empty (sideset proceeds even if
+    in pins, 1  side 1 [1] ; instruction stalls, so we stall with SCK low)
+
+.program spi_cpha1
+.side_set 1
+
+; Clock phase = 1: data transitions on the leading edge of each SCK pulse, and
+; is captured on the trailing edge.
+
+    out x, 1    side 0     ; Stall here on empty (keep SCK deasserted)
+    mov pins, x side 1 [1] ; Output data, assert SCK (mov pins uses OUT mapping)
+    in pins, 1  side 0     ; Input data, deassert SCK
+
+% c-sdk {
+#include "hardware/gpio.h"
+static inline void pio_spi_init(PIO pio, uint sm, uint prog_offs, uint n_bits,
+        float clkdiv, bool cpha, bool cpol, uint pin_sck, uint pin_mosi, uint pin_miso) {
+    pio_sm_config c = cpha ? spi_cpha1_program_get_default_config(prog_offs) : spi_cpha0_program_get_default_config(prog_offs);
+    sm_config_set_out_pins(&c, pin_mosi, 1);
+    sm_config_set_in_pins(&c, pin_miso);
+    sm_config_set_sideset_pins(&c, pin_sck);
+    // Modified for LSB-first (shift to right, auto push/pull, threshold=nbits)
+    sm_config_set_out_shift(&c, true, true, n_bits);
+    sm_config_set_in_shift(&c, true, true, n_bits);
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    // MOSI, SCK output are low, MISO is input
+    pio_sm_set_pins_with_mask(pio, sm, 0, (1u << pin_sck) | (1u << pin_mosi));
+    pio_sm_set_pindirs_with_mask(pio, sm, (1u << pin_sck) | (1u << pin_mosi), (1u << pin_sck) | (1u << pin_mosi) | (1u << pin_miso));
+    pio_gpio_init(pio, pin_mosi);
+    pio_gpio_init(pio, pin_miso);
+    pio_gpio_init(pio, pin_sck);
+
+    // The pin muxes can be configured to invert the output (among other things
+    // and this is a cheesy way to get CPOL=1
+    gpio_set_outover(pin_sck, cpol ? GPIO_OVERRIDE_INVERT : GPIO_OVERRIDE_NORMAL);
+    // SPI is synchronous, so bypass input synchroniser to reduce input delay.
+    hw_set_bits(&pio->input_sync_bypass, 1u << pin_miso);
+
+    pio_sm_init(pio, sm, prog_offs, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}
+
+; Protocol-aware SPI with automatic chip select.
+; Side-set: bit 0 = CSn (active low), bit 1 = SCK.
+; Software pushes: header word, count-1, then count data bytes.
+; PIO pushes one RX byte per data byte (no RX during header).
+; CS asserts on header arrival, deasserts when transfer completes.
+; 4 PIO cycles per SPI bit (CPHA=0, CPOL=0).
+
+.program spi_proto
+.side_set 2
+
+; Side-set encoding: {SCK, CSn}
+;   0x0 = CSn low (active),  SCK low
+;   0x1 = CSn high (idle),   SCK low
+;   0x2 = CSn low (active),  SCK high
+;   0x3 = CSn high (idle),   SCK high
+
+.wrap_target
+    pull block            side 0x1      ; Wait for header, CSn high, SCK low
+    set x, 9              side 0x0      ; Assert CSn, 10 header bits
+header_loop:
+    out pins, 1           side 0x0 [1]  ; MOSI out, SCK low (2 cycles)
+    nop                   side 0x2      ; SCK rising edge (1 cycle)
+    jmp x-- header_loop   side 0x2      ; SCK high (1 cycle), loop
+    pull block            side 0x0      ; Get byte count - 1
+    mov x, osr            side 0x0      ; X = count - 1
+data_byte:
+    pull block            side 0x0      ; Get TX byte (stalls with CSn active)
+    set y, 7              side 0x0      ; 8 bits per byte
+bit_loop:
+    out pins, 1           side 0x0 [1]  ; MOSI out, SCK low (2 cycles)
+    in pins, 1            side 0x2      ; MISO in, SCK rising edge
+    jmp y-- bit_loop      side 0x2      ; SCK high, loop
+    in null, 24           side 0x0      ; Right-justify RX byte to [7:0]
+    push                  side 0x0      ; Push RX byte to FIFO
+    jmp x-- data_byte     side 0x0      ; Next byte or done
+    nop                   side 0x1      ; Deassert CSn (back porch)
+.wrap
+
+% c-sdk {
+static inline void pio_spi_proto_init(PIO pio, uint sm, uint prog_offs,
+        float clkdiv, uint pin_csn, uint pin_mosi, uint pin_miso) {
+    // pin_csn is sideset base: CSn = pin_csn, SCK = pin_csn + 1
+    uint pin_sck = pin_csn + 1;
+    pio_sm_config c = spi_proto_program_get_default_config(prog_offs);
+    sm_config_set_out_pins(&c, pin_mosi, 1);
+    sm_config_set_in_pins(&c, pin_miso);
+    sm_config_set_sideset_pins(&c, pin_csn);
+    sm_config_set_out_shift(&c, true, false, 32);  // LSB-first, no autopull
+    sm_config_set_in_shift(&c, true, false, 32);   // LSB-first, no autopush
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    // CSn high, SCK low, MOSI low initially
+    pio_sm_set_pins_with_mask(pio, sm, (1u << pin_csn),
+        (1u << pin_csn) | (1u << pin_sck) | (1u << pin_mosi));
+    pio_sm_set_pindirs_with_mask(pio, sm,
+        (1u << pin_csn) | (1u << pin_sck) | (1u << pin_mosi),
+        (1u << pin_csn) | (1u << pin_sck) | (1u << pin_mosi) | (1u << pin_miso));
+    pio_gpio_init(pio, pin_csn);
+    pio_gpio_init(pio, pin_sck);
+    pio_gpio_init(pio, pin_mosi);
+    pio_gpio_init(pio, pin_miso);
+
+    // Bypass input synchroniser for lower latency
+    hw_set_bits(&pio->input_sync_bypass, 1u << pin_miso);
+
+    pio_sm_init(pio, sm, prog_offs, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}

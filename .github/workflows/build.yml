@@ -1,0 +1,147 @@
+name: Build
+
+on:
+  push:
+    branches: [main, develop, task/ci]
+  pull_request:
+    branches: [main, develop, task/ci]
+
+jobs:
+  build-firmware-rp2040:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install ARM toolchain and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc-arm-none-eabi
+
+      - name: Set up Pico SDK
+        run: |
+          cd /tmp
+          git clone https://github.com/raspberrypi/pico-sdk.git
+          echo "PICO_SDK_PATH=/tmp/pico-sdk" >> $GITHUB_ENV
+
+      - name: Build RP2040 firmware
+        run: |
+          mkdir -p build-rp2040
+          cd build-rp2040
+          cmake -DBUILD_PFCLI=OFF -DPLATFORM=rp2040 ..
+          cmake --build .
+
+      - name: Upload RP2040 artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: rp2040-firmware
+          path: build-rp2040/PicoFacet.*
+          retention-days: 5
+
+  build-firmware-ch32v305:
+    runs-on: ubuntu-latest
+    env:
+      RISCV_TOOLCHAIN_VER: 15.2.0-1
+      RISCV_TEMP_FILE: /tmp/riscv_toolchain.tar.gz
+      RISCV_TEMP_PATH: /tmp/riscv_toolchain
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install CMake
+        run: |
+          sudo apt-get install -y cmake
+
+      - name: Install RISC-V toolchain
+        run: |
+          wget --quiet -O ${RISCV_TEMP_FILE} https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/releases/download/v${RISCV_TOOLCHAIN_VER}/xpack-riscv-none-elf-gcc-${RISCV_TOOLCHAIN_VER}-linux-x64.tar.gz
+          mkdir ${RISCV_TEMP_PATH}
+          tar xf ${RISCV_TEMP_FILE} -C ${RISCV_TEMP_PATH}
+          echo "${RISCV_TEMP_PATH}/xpack-riscv-none-elf-gcc-${RISCV_TOOLCHAIN_VER}/bin" >> $GITHUB_PATH
+
+      - name: Build CH32V305 firmware
+        run: |
+          mkdir -p build-ch32v305
+          cd build-ch32v305
+          cmake -DBUILD_PFCLI=OFF -DPLATFORM=ch32v305 ..
+          cmake --build .
+
+      - name: Upload CH32V305 artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ch32v305-firmware
+          path: |
+            build-ch32v305/PicoFacet.elf
+            build-ch32v305/PicoFacet.hex
+            build-ch32v305/PicoFacet.bin
+          retention-days: 30
+
+  build-pfcli:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            runner: linux
+          - os: macos-latest
+            runner: macos
+          - os: windows-latest
+            runner: windows
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install dependencies (Ubuntu)
+        if: matrix.runner == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libusb-1.0-0-dev
+
+      - name: Install dependencies (macOS)
+        if: matrix.runner == 'macos'
+        run: |
+          brew install cmake libusb pkg-config
+
+      - name: Install dependencies (Windows)
+        if: matrix.runner == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-libusb
+            mingw-w64-x86_64-ninja
+
+      - name: Build pfcli
+        if: matrix.runner != 'windows'
+        run: |
+          mkdir -p build-pfcli
+          cd build-pfcli
+          cmake ../pfcli
+          cmake --build . --config Release
+
+      - name: Build pfcli (Windows)
+        if: matrix.runner == 'windows'
+        shell: msys2 {0}
+        run: |
+          mkdir -p build-pfcli
+          cmake -B build-pfcli \
+            -S pfcli \
+            -G Ninja
+          cmake --build build-pfcli --config Release
+          ls -R build-pfcli/
+
+      - name: Upload pfcli artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: pfcli-${{ matrix.runner }}
+          path: |
+            build-pfcli/pfcli
+            build-pfcli/pfcli.exe
+          retention-days: 30

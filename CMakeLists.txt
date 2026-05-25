@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.12)
 
+option(BUILD_PFCLI "Build pfcli tool" ON)
+
 # Platform selection: cmake -DPLATFORM=rp2040 or cmake -DPLATFORM=ch32v305
 if(NOT PLATFORM)
     message(FATAL_ERROR "PLATFORM not set. Use -DPLATFORM=rp2040 or -DPLATFORM=ch32v305")
@@ -114,10 +116,12 @@ else()
 endif()
 
 # pfcli — native host tool, built with system compiler via ExternalProject
-include(ExternalProject)
-ExternalProject_Add(pfcli
-    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/pfcli
-    BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/pfcli
-    INSTALL_COMMAND ""
-    BUILD_ALWAYS TRUE
-)
+if(BUILD_PFCLI)
+    include(ExternalProject)
+    ExternalProject_Add(pfcli
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/pfcli
+        BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/pfcli
+        INSTALL_COMMAND ""
+        BUILD_ALWAYS TRUE
+    )
+endif()

@@ -108,16 +108,10 @@ jobs:
           which pkg-config
           ls -l $(which pkg-config)
           pkg-config --libs libusb-1.0
-          
+
       - name: Patch include path for macOS
         if: matrix.runner == 'macos'
         run: sed -i '' 's|libusb-1.0/libusb.h|libusb.h|' pfcli/usb.c
-      - name: Set libusb link path for macOS
-        if: matrix.runner == 'macos'
-        run: |
-          LIBUSB_LIB=$(pkg-config --variable=libdir libusb-1.0)
-          echo "LDFLAGS=-L$LIBUSB_LIB" >> $GITHUB_ENV
-          echo "LIBRARY_PATH=$LIBUSB_LIB" >> $GITHUB_ENV
 
       - name: Install dependencies (Windows)
         if: matrix.runner == 'windows'

@@ -104,14 +104,6 @@ jobs:
         if: matrix.runner == 'macos'
         run: |
           brew install cmake libusb pkg-config
-          brew ls libusb
-          which pkg-config
-          ls -l $(which pkg-config)
-          pkg-config --libs libusb-1.0
-
-      - name: Patch include path for macOS
-        if: matrix.runner == 'macos'
-        run: sed -i '' 's|libusb-1.0/libusb.h|libusb.h|' pfcli/usb.c
 
       - name: Install dependencies (Windows)
         if: matrix.runner == 'windows'

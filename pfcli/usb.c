@@ -8,7 +8,11 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef __APPLE__
+#include <libusb.h>
+#else
 #include <libusb-1.0/libusb.h>
+#endif
 
 #define VID 0x600D
 #define PID 0x7002
